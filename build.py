@@ -158,6 +158,8 @@ def ParseArguments():
                        help = 'Build C# semantic completion engine.' )
   parser.add_argument( '--gocode-completer', action = 'store_true',
                        help = 'Build Go semantic completion engine.' )
+  parser.add_argument( '--racer-completer', action = 'store_true',
+                       help = 'Build rust semantic completion engine.' )
   parser.add_argument( '--system-boost', action = 'store_true',
                        help = 'Use the system boost instead of bundled one. '
                        'NOT RECOMMENDED OR SUPPORTED!')
@@ -167,6 +169,7 @@ def ParseArguments():
   parser.add_argument( '--arch', type = int, choices = [ 32, 64 ],
                        help = 'Force architecture to 32 or 64 bits on '
                        'Windows (default: python interpreter architecture).' )
+
   args = parser.parse_args()
 
   if args.system_libclang and not args.clang_completer:
@@ -252,6 +255,21 @@ def BuildGoCode():
   os.chdir( p.join( DIR_OF_THIS_SCRIPT, 'third_party', 'gocode' ) )
   subprocess.check_call( [ 'go', 'build' ] )
 
+def BuildRacerd():
+  """
+  Look for multirust and built racerd. Support will be added in the future for
+  attempting to build with the system cargo/rustc if multirust is not
+  available. For now, multirust is required.
+  """
+  if not find_executable( 'multirust' ):
+    sys.exit( 'multirust is required for the rust completer' )
+
+  os.chdir( p.join( DIR_OF_THIRD_PARTY, 'racerd' ) )
+  subprocess.check_call( [ 'multirust', 'update', 'beta' ] )
+  # Use beta cargo/rustc version for the racerd submodule
+  subprocess.check_call( [ 'multirust', 'override', 'beta' ] )
+  subprocess.check_call( [ 'cargo', 'build', '--release' ] )
+
 
 def Main():
   CheckDeps()
@@ -261,6 +279,8 @@ def Main():
     BuildOmniSharp()
   if args.gocode_completer:
     BuildGoCode()
+  if args.racer_completer:
+    BuildRacerd()
 
 if __name__ == '__main__':
   Main()

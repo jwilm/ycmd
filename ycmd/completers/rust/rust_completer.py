@@ -1,11 +1,8 @@
 #!/usr/bin/env python
-# vim: ts=2 sw=2 cc=80 tw=79
 #
-# Copyright (C) 2011, 2012  Stephen Sugden <me@stephensugden.com>
-#                           Google Inc.
-#                           Stanislav Golovanov <stgolovanov@gmail.com>
+# Copyright (C) 2015 ycmd contributors
 #
-# This file is part of YouCompleteMe.
+# This file is part of ycmd.
 #
 # YouCompleteMe is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -34,10 +31,15 @@ import os
 
 from os import path as p
 
+BINARY_NOT_FOUND_MESSAGE = ( 'racerd binary not found. Did you build it? ' +
+                             'You can do so by running ' +
+                             '"./install.py --racerd-completer".' )
+RUST_SOURCE_NOT_FOUND_MESSAGE = ( 'rust source not found' )
 DIR_OF_THIS_SCRIPT = p.dirname( p.abspath( __file__ ) )
 DIR_OF_THIRD_PARTY = p.abspath( p.join( DIR_OF_THIS_SCRIPT,
                              '..', '..', '..', 'third_party' ) )
-RACERD = p.join( DIR_OF_THIRD_PARTY, 'racerd', 'target', 'release', 'racerd' )
+PATH_TO_RACERD = p.join( DIR_OF_THIRD_PARTY, 'racerd', 'target',
+                         'release', 'racerd' )
 
 class RustCompleter( Completer ):
   """
@@ -45,28 +47,18 @@ class RustCompleter( Completer ):
   https://github.com/jwilm/racerd
   """
 
-  def _GetRustSrcPath( self ):
-    """
-    Provide path to rust source directory for use by the completer.
-
-    This could just be passed through by the environment, but it may be moved
-    into editor configuration or some other location in which case this would
-    become necessary anyways.
-    """
-    src_key = 'RUST_SRC_PATH'
-    if not os.environ.has_key(src_key):
-      raise RuntimeError( src_key + ' environment variable is not set' )
-
-    return os.environ[src_key]
-
-
   def __init__( self, user_options ):
     super( RustCompleter, self ).__init__( user_options )
-    self._racerd_host = None
     self._logger = logging.getLogger( __name__ )
-    self._logger.info('building RustCompleter')
-    self._keep_logfiles = user_options[ 'server_keep_logfiles' ]
-    self._StartServer()
+    self._racerd_phandle = None
+    self._racerd_binary = self._FindRacerdBinary( user_options )
+    self._rust_src_path = self._FindRustSrcPath( user_options )
+
+    if not self._racerd_binary:
+      raise RuntimeError( BINARY_NOT_FOUND_MESSAGE )
+
+    if not self._rust_src_path:
+      raise RuntimeError( RUST_SOURCE_NOT_FOUND_MESSAGE )
 
 
   def SupportedFiletypes( self ):
@@ -82,7 +74,8 @@ class RustCompleter( Completer ):
     were found.
     """
     self._logger.info('RustCompleter._GetResponse')
-    target = urlparse.urljoin( self._racerd_host, handler )
+    target = urlparse.urljoin('http://localhost:' + str(self._racerd_port),
+                              handler)
     parameters = self._TranslateRequest( request_data )
     response = requests.post( target, json = parameters )
     response.raise_for_status()
@@ -153,19 +146,53 @@ class RustCompleter( Completer ):
   def _FetchCompletions( self, request_data ):
     return self._GetResponse( '/list_completions', request_data )
 
+
+  def _FindRacerdBinary( self, user_options ):
+    """ Find the path to racerd binary
+
+    If 'racerd_binary_path' in the options is blank,
+    use the version installed with YCM, if it exists,
+    then the one on the path, if not.
+
+    If the 'racerd_binary_path' is specified, use it
+    as an absolute path.
+
+    If the resolved binary exists, return the path,
+    otherwise return None. """
+    # This is similar to FindGoCodeBinary in gocode_completer
+    if user_options.get( 'racerd_binary_path' ):
+      if os.path.isfile( user_options[ 'racerd_binary_path' ] ):
+        return user_options[ 'racerd_binary_path' ]
+      else:
+        return None
+    if os.path.isfile( PATH_TO_RACERD ):
+      return PATH_TO_RACERD
+    return utils.PathToFirstExistingExecutable( [ 'racerd' ] )
+
+  def _FindRustSrcPath( self, user_options):
+    if user_options.get( 'rust_src_path' ):
+      if os.path.isdir( user_options[ 'rust_src_path' ] ):
+        return user_options[ 'rust_src_path' ]
+      else:
+        return None
+
+    src_key = 'RUST_SRC_PATH'
+    if os.environ.has_key( src_key ) and os.path.isdir( os.environ[src_key] ):
+      return os.environ[src_key]
+
+    return None
+
+
   def _StartServer( self ):
-    self._logger.info('_StartServer using RACERD = ' + RACERD)
+    self._racerd_port = utils.GetUnusedLocalhostPort()
     self._racerd_phandle = utils.SafePopen( [
-        RACERD, 'serve', '--port=0', '--secret-file=not_supported',
-                '--rust-src-path=' + self._GetRustSrcPath()
+        self._racerd_binary, 'serve', '--port',
+                str(self._racerd_port), '--secret-file=not_supported',
+                '--rust-src-path', self._rust_src_path
       ], stdout = subprocess.PIPE )
 
-    # The first line output by racerd includes the host and port the server is
-    # listening on.
-    host = self._racerd_phandle.stdout.readline()
-    self._logger.info('_StartServer using host = ' + host)
-    host = host.split()[3]
-    self._racerd_host = 'http://' + host
+    self._logger.info('racerd serving HTTP on ' + str(self._racerd_port))
+
 
   def DefinedSubcommands( self ):
     return [
@@ -175,25 +202,31 @@ class RustCompleter( Completer ):
       'StopServer',
     ]
 
+
   def ServerIsRunning( self ):
-    self._GetResponse( '/ping', { 'ping': True } )
+    if self._racerd_phandle != None and self._racerd_phandle.poll() == None:
+      return True
+    return False
+
 
   def _StopServer( self ):
-    self._racerd_phandle.terminate()
+    self._racerd_phandle.kill()
     self._racerd_phandle = None
+
 
   def RestartServer( self ):
     self._StopServer()
     self._StartServer()
 
+
   def _RestartServer( self, request_data ):
-    # TODO request_data
     self._RestartServer()
 
-  # TODO
-  # def OnFileReadyToParse( self, request_data ):
-  #   if not self.ServerIsRunning():
-  #     self._StartServer( request_data )
+
+  def OnFileReadyToParse( self, request_data ):
+    if not self.ServerIsRunning():
+      self._StartServer()
+
 
   def OnUserCommand( self, arguments, request_data ):
     if not arguments:
@@ -239,5 +272,6 @@ class RustCompleter( Completer ):
     except Exception:
       raise RuntimeError( 'Can\'t jump to definition.' )
 
+
   def Shutdown( self ):
-    self._racerd_phandle.terminate()
+    self._StopServer()
